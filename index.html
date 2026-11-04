@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2f5d50">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="苗栗田調">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>苗栗田調</title>
+<style>
+  :root { --ink:#1f2a27; --mute:#5f6b67; --line:#d6dcd9; --bg:#f6f7f6; --card:#fff; --acc:#2f5d50; --acc2:#e3eeea; --warn:#a15c00; --bad:#a32a2a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif; color:var(--ink); background:var(--bg); font-size:16px; -webkit-text-size-adjust:100%; }
+  header { position:sticky; top:0; z-index:5; display:flex; align-items:center; justify-content:space-between; padding:12px 16px; padding-top:calc(12px + env(safe-area-inset-top)); background:var(--acc); color:#fff; }
+  header h1 { font-size:18px; margin:0; }
+  .badge { font-size:13px; padding:4px 10px; border-radius:999px; background:rgba(255,255,255,.18); }
+  .badge.warn { background:#ffd27a; color:#3a2600; } .badge.ok { background:rgba(255,255,255,.25); } .badge.busy { background:#fff; color:var(--acc); }
+  main { padding:16px 16px 120px; max-width:720px; margin:0 auto; }
+  h2 { font-size:20px; margin:8px 0 4px; } h3 { font-size:16px; margin:20px 0 8px; }
+  .lead { color:var(--mute); margin:4px 0 12px; } .small { color:var(--mute); font-size:13px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .dog { text-align:left; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:2px; font:inherit; color:inherit; min-height:96px; }
+  .dog-id { font-weight:700; font-size:17px; } .dog-name { font-size:15px; } .dog-meta { font-size:12px; color:var(--mute); }
+  .btn { font:inherit; font-size:16px; border-radius:10px; padding:12px 16px; border:1px solid var(--acc); background:#fff; color:var(--acc); min-height:48px; }
+  .btn.primary { background:var(--acc); color:#fff; } .btn.block { width:100%; margin:8px 0; } .btn.ghost { background:#fff; }
+  .row { display:flex; } .gap { gap:10px; margin-top:16px; } .row .btn { flex:1; }
+  .back { font:inherit; background:none; border:none; color:var(--acc); padding:8px 0; font-size:16px; }
+  .list { display:flex; flex-direction:column; gap:8px; }
+  .item { display:flex; justify-content:space-between; align-items:center; font:inherit; background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px 12px; color:inherit; min-height:52px; }
+  .pill { font-size:12px; padding:3px 8px; border-radius:999px; border:1px solid var(--line); }
+  .pill.pending { border-color:var(--warn); color:var(--warn); } .pill.synced { border-color:var(--acc); color:var(--acc); } .pill.draft { color:var(--mute); }
+  .mode { display:flex; border:1px solid var(--acc); border-radius:10px; overflow:hidden; margin:8px 0 12px; position:sticky; top:56px; z-index:4; background:#fff; }
+  .seg { flex:1; font:inherit; border:none; background:#fff; color:var(--acc); padding:10px; min-height:44px; } .seg.on { background:var(--acc); color:#fff; }
+  .sec { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:4px 12px 12px; margin:0 0 12px; }
+  .sec summary { font-weight:700; padding:12px 0; font-size:16px; }
+  .field { margin:12px 0; } .flabel { display:block; font-weight:600; margin-bottom:6px; font-size:15px; }
+  .req { color:var(--bad); } .tag { font-size:11px; font-weight:400; margin-left:6px; padding:2px 6px; border-radius:6px; background:#fff3dc; color:var(--warn); }
+  .hint { font-size:13px; color:var(--mute); margin:-2px 0 6px; }
+  input, textarea { width:100%; font:inherit; font-size:16px; padding:12px; border:1px solid var(--line); border-radius:10px; background:#fff; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  .chip { font:inherit; font-size:15px; padding:9px 12px; border-radius:999px; border:1px solid var(--line); background:#fff; color:var(--ink); min-height:42px; }
+  .chip.on { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .lvl { margin-top:8px; font-size:14px; font-weight:600; color:var(--acc); }
+  .rep { border:1px dashed var(--line); border-radius:10px; padding:4px 10px; margin:10px 0; }
+  .rep-h { display:flex; justify-content:space-between; align-items:center; padding-top:8px; }
+  .link { font:inherit; background:none; border:none; color:var(--acc); padding:6px; } .link.danger { color:var(--bad); }
+  .bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:10px; padding:10px 16px; padding-bottom:calc(10px + env(safe-area-inset-bottom)); background:#fff; border-top:1px solid var(--line); z-index:6; }
+  .bar .btn { flex:1; }
+  #toast { position:fixed; left:50%; bottom:90px; transform:translateX(-50%) translateY(20px); background:#1f2a27; color:#fff; padding:10px 16px; border-radius:10px; font-size:14px; opacity:0; transition:.2s; z-index:9; max-width:90vw; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<header><h1>苗栗田調</h1><span id="syncBadge" class="badge">—</span></header>
+<main id="app"></main>
+<div id="toast"></div>
+<script src="fields.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
