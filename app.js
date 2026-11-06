@@ -1,9 +1,9 @@
-/* 苗栗田調 手機紀錄頁 v2.4
+/* 苗栗田調 手機紀錄頁 v2.5
  * 離線可填、恢復連線自動同步到 Google 試算表（Apps Script 接收）
  */
 (function () {
   'use strict';
-  const APP_VERSION = '2.4.0';
+  const APP_VERSION = '2.5.0';
   const LS_RECORDS = 'mlt_records_v2';
   const LS_SETTINGS = 'mlt_settings_v2';
   const VISITS = ['第1次', '第2次', '第3次', '第4次'];
@@ -22,6 +22,8 @@
   const $sync = document.getElementById('syncBadge');
   let state = { view: 'home', dogId: null, recordId: null, mode: 'live' };
   let syncing = false;
+  let deleting = false;
+  let selectedForDeletion = new Set();
 
   // ---------- 儲存 ----------
   const loadRecords = () => { try { return JSON.parse(localStorage.getItem(LS_RECORDS) || '{}'); } catch (e) { return {}; } };
@@ -47,7 +49,7 @@
     const recs = Object.values(loadRecords());
     const pending = recs.filter(r => r.status === 'pending').length;
     const drafts = recs.filter(r => r.status === 'draft').length;
-    if (syncing) { $sync.textContent = '同步中…'; $sync.className = 'badge busy'; }
+    if (syncing || deleting) { $sync.textContent = deleting ? '清除資料中…' : '同步中…'; $sync.className = 'badge busy'; }
     else if (pending) { $sync.textContent = `待上傳 ${pending} 筆`; $sync.className = 'badge warn'; }
     else if (drafts) { $sync.textContent = `草稿 ${drafts} 筆`; $sync.className = 'badge'; }
     else { $sync.textContent = navigator.onLine ? '無待上傳紀錄' : '離線中'; $sync.className = navigator.onLine ? 'badge ok' : 'badge'; }
@@ -114,10 +116,12 @@
     }).join('');
     $app.innerHTML = `<p class="lead">選擇犬隻（一律以編號辨識）</p><div class="grid">${cards}</div>
       <div class="row gap"><button class="btn ghost" id="goSettings">設定</button><button class="btn ghost" id="syncNow">立即同步</button></div>
+      <button class="btn ghost block" id="goManage">管理／清除試填紀錄</button>
       <button class="btn ghost block" id="pullAll">從雲端載入全部紀錄</button>
       <p class="small">版本 ${APP_VERSION}｜${esc(FORM.version)}</p>`;
     $app.querySelectorAll('[data-dog]').forEach(b => b.onclick = () => go({ view: 'dog', dogId: b.dataset.dog }));
     document.getElementById('goSettings').onclick = () => go({ view: 'settings' });
+    document.getElementById('goManage').onclick = () => go({ view: 'manage' });
     document.getElementById('syncNow').onclick = () => syncAll(true);
     document.getElementById('pullAll').onclick = () => pull(null, true);
   }
@@ -159,8 +163,8 @@
       const sel = Array.isArray(val) ? val : [];
       const groups = FORM.behaviors.map(g => {
         const count = g.items.filter(o => sel.includes(o)).length;
-        return `<details class="behavior-group"${count ? ' open' : ''}><summary>${esc(g.title)}${count ? `（已選 ${count}）` : ''}</summary>
-          <div class="behavior-choices">${g.items.map(o => `<button type="button" class="chip${sel.includes(o) ? ' on' : ''}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div></details>`;
+        return `<div class="behavior-group"><div class="behavior-title">${esc(g.title)}${count ? `（已選 ${count}）` : ''}</div>
+          <div class="behavior-choices">${g.items.map(o => `<button type="button" class="chip${sel.includes(o) ? ' on' : ''}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div></div>`;
       }).join('');
       input = `<div class="behavior-picker" ${name}>${groups}</div>
         <div class="hint">依實際看到的動作勾選；不依單一動作自動判定壓力或「超過門檻」。沒有看見不等於沒有發生。</div>`;
@@ -174,19 +178,14 @@
     return `<div class="field">${label}${hint}${input}</div>`;
   }
 
+  // 表單區塊全部展開，不使用 details 收合，減少手機反覆點開的操作。
   function sectionHtml(sec, rec, dog) {
-    const body = (sec.note ? `<div class="hint">${esc(sec.note)}</div>` : '') + sec.fields.map(f => fieldHtml(f, rec.main[f.k], 'main', dog)).join('');
-    if (!sec.fields.some(f => fieldHtml(f, rec.main[f.k], 'main', dog))) {
-      // 現場模式下整節都是影片補：保留標題，節次才不會跳號
-      return `<details class="sec"><summary>${esc(sec.title)}</summary><div class="hint">這一節看影片後補，切到上方「完整（含影片補）」填寫。</div></details>`;
-    }
-    if (sec.id === 'identity' && rec.main['訪視次序'] !== '第1次') {
-      const filled = IDENTITY_KEYS.filter(k => !isEmpty(rec.main[k]));
-      const note = filled.length ? '已沿用前次資料，身分有變動才需要修改。' : '找不到前次資料，可展開填寫。';
-      return `<details class="sec"><summary>${esc(sec.title)}</summary><div class="hint">${note}</div>${body}</details>`;
-    }
-    const opened = ['basic','vehicle'].includes(sec.id) || (sec.id === 'identity' && rec.main['訪視次序'] === '第1次');
-    return `<details class="sec"${opened ? ' open' : ''}><summary>${esc(sec.title)}</summary>${body}</details>`;
+    const visible = sec.fields.filter(f => !(state.mode === 'live' && f.src === 'video') && !(f.chained && dog.type !== '鏈養'));
+    const body = (sec.note ? `<div class="hint">${esc(sec.note)}</div>` : '') + visible.map(f => fieldHtml(f, rec.main[f.k], 'main', dog)).join('');
+    if (!visible.length) return `<section class="sec"><h3 class="section-heading">${esc(sec.title)}</h3><div class="hint">這一節在「完整（含影片補）」模式填寫。</div></section>`;
+    const inherited = sec.id === 'identity' && rec.main['訪視次序'] !== '第1次'
+      ? `<div class="hint">已填的基本身分資料會沿用；需要更新時可直接修改。</div>` : '';
+    return `<section class="sec"><h3 class="section-heading">${esc(sec.title)}</h3>${inherited}${body}</section>`;
   }
 
   // 可重複的子表（陪伴活動、自然發生事件）
@@ -210,36 +209,17 @@
     if (L.sec) return sectionHtml(secById(L.sec), rec, dog);
     const note = L.note ? `<div class="hint">${esc(L.note)}</div>` : '';
     if (L.activities) {
-      return `<details class="sec"><summary>${esc(L.title)}</summary>${note}
-        <div class="hint">本次若不適合提供活動，可不新增活動；由 A 記錄不提供的原因。</div>
-        <h4 class="sub">${esc(FORM.activities.title)}</h4>${repeatInner('activities', FORM.activities, rec, dog, '新增活動')}</details>`;
+      return `<section class="sec"><h3 class="section-heading">${esc(L.title)}</h3>${note}
+        <div class="hint">若不適合提供活動，可以不新增活動，並在「本次建議與備註」說明。</div>
+        <h4 class="sub">${esc(FORM.activities.title)}</h4>${repeatInner('activities', FORM.activities, rec, dog, '新增活動')}</section>`;
     }
-    if (L.pass) return `<details class="sec"><summary>${esc(L.title)}</summary>${note}${passInner(L.pass, rec, dog)}</details>`;
+    if (L.pass) return `<section class="sec"><h3 class="section-heading">${esc(L.title)}</h3>${note}${passInner(L.pass, rec, dog)}</section>`;
     if (L.events) {
       const head = FORM.events.head.map(f => fieldHtml(f, rec.main[f.k], 'main', dog)).join('');
-      return `<details class="sec"><summary>${esc(FORM.events.title)}</summary><div class="hint">${esc(FORM.events.note)}</div>
-        ${head}${repeatInner('events', FORM.events, rec, dog, '新增事件')}</details>`;
+      return `<section class="sec"><h3 class="section-heading">${esc(FORM.events.title)}</h3><div class="hint">${esc(FORM.events.note)}</div>
+        ${head}${repeatInner('events', FORM.events, rec, dog, '新增事件')}</section>`;
     }
     return '';
-  }
-
-  // 舊版資料保留原欄位：即使新畫面已不再顯示「陪伴中」測試與階梯分級，仍可查閱，不覆蓋原始紀錄。
-  function legacyHtml(rec) {
-    const known = new Set(FORM.sections.flatMap(s => s.fields.map(f => f.k)).concat(FORM.events.head.map(f => f.k)));
-    const older = Object.entries(rec.main || {}).filter(([k,v]) => !known.has(k) && !isEmpty(v));
-    const olderPass = (rec.passes || []).filter(p => !FORM.passes.timings.includes(p['經過時機']));
-    const oldKeys = new Set(FORM.passes.fields.map(f => f.k));
-    const extraPass = (rec.passes || []).filter(p => FORM.passes.timings.includes(p['經過時機']))
-      .map(p => ({ timing:p['經過時機'], vals:Object.entries(p).filter(([k,v]) => !oldKeys.has(k) && !isEmpty(v)) }))
-      .filter(x => x.vals.length);
-    if (!older.length && !olderPass.length && !extraPass.length) return '';
-    const view = (rows) => rows.map(([k,v]) => `<div class="legacy-row"><strong>${esc(k)}：</strong>${esc(Array.isArray(v) ? v.join('、') : typeof v === 'object' ? JSON.stringify(v) : v)}</div>`).join('');
-    return `<details class="sec"><summary>舊版歷史欄位（僅供查閱，原始資料保留）</summary>
-      <div class="hint">以下是舊版已存內容；新流程不再採用舊版行為階梯自動評分，也不再增加「陪伴中」行人測試。</div>
-      ${view(older)}
-      ${olderPass.map((p,i) => `<h4 class="sub">舊行人紀錄 ${i+1}（${esc(p['經過時機']||'')}）</h4>${view(Object.entries(p))}`).join('')}
-      ${extraPass.map(x=>`<h4 class="sub">${esc(x.timing)}的舊欄位</h4>${view(x.vals)}`).join('')}
-    </details>`;
   }
 
   function renderForm() {
@@ -248,7 +228,7 @@
     if (!rec) return go({ view: 'home' });
     if (ensurePasses(rec)) { recs[rec.record_id] = rec; saveRecords(recs); }
     const dog = dogById(rec.dog_id) || { id: rec.dog_id, name: '', type: '' };
-    const parts = FORM.layout.map(L => blockHtml(L, rec, dog)).join('') + legacyHtml(rec);
+    const parts = FORM.layout.map(L => blockHtml(L, rec, dog)).join('');
     $app.innerHTML = `<button class="back" id="back">‹ ${esc(dog.id)}｜${esc(dog.name)}</button>
       <div class="mode"><button class="seg${state.mode === 'live' ? ' on' : ''}" data-mode="live">現場快填</button><button class="seg${state.mode === 'all' ? ' on' : ''}" data-mode="all">完整（含影片補）</button></div>
       <form id="f" autocomplete="off">${parts}</form>
@@ -412,7 +392,7 @@
     const s = loadSettings();
     if (!s.url || !s.key) { if (manual) toast('請先到「設定」填網址與存取金鑰'); updateSyncBadge(); return; }
     if (!navigator.onLine) { if (manual) toast('目前離線，恢復連線後會自動上傳'); updateSyncBadge(); return; }
-    if (syncing) return;
+    if (syncing || deleting) return;
     syncing = true; updateSyncBadge();
     let ok = 0, fail = 0, lastErr = '';
     const ids = Object.values(loadRecords()).filter(r => r.status === 'pending').map(r => r.record_id);
@@ -460,6 +440,77 @@
     } catch (e) { if (manual) toast('載入失敗：' + e.message); }
   }
 
+  // ---------- 管理試填紀錄（必須手動選擇；不會自動刪資料） ----------
+  function downloadBackup() {
+    const blob = new Blob([JSON.stringify({ exported_at: nowIso(), app_version: APP_VERSION, records: loadRecords() }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `苗栗田調_清除前備份_${today()}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  function renderManage() {
+    const recs = Object.values(loadRecords()).sort((a,b)=>(b.updated_at||'').localeCompare(a.updated_at||''));
+    const rows = recs.map(r => {
+      const dog = dogById(r.dog_id);
+      const title = `${r.main?.['日期']||'無日期'}｜${r.main?.['訪視次序']||'未分次'}｜${r.dog_id} ${dog?.name||''}`;
+      return `<label class="manage-record"><input type="checkbox" data-mark="${esc(r.record_id)}"${selectedForDeletion.has(r.record_id)?' checked':''}><span><b>${esc(title)}</b><br><span class="small">${esc(r.status === 'synced'?'已上傳':'本機草稿／待上傳')}｜${esc(r.record_id)}</span></span></label>`;
+    }).join('');
+    $app.innerHTML = `<button class="back" id="back">‹ 返回</button><h2>管理／清除試填紀錄</h2>
+      <div class="danger-note">只勾選確定屬於「試填」的資料。清除不可復原，請先下載備份。<b>只刪本機</b>不會刪除雲端資料，日後可能重新載入；如要連雲端一起清除，必須先更新本包的 Apps Script 並部署新版本。</div>
+      <button class="btn ghost block" id="backupBeforeDelete">下載清除前備份（JSON）</button>
+      <button class="btn ghost block" id="loadBeforeDelete">先從雲端載入全部紀錄（避免漏掉雲端試填）</button>
+      <p class="small">目前這台手機有 ${recs.length} 筆紀錄；請勾選欲清除的試填。</p>
+      <div class="row gap"><button class="btn ghost" id="selectAll">全選目前紀錄</button><button class="btn ghost" id="unselectAll">取消全選</button></div>
+      <div id="manageRows">${rows || '<p class="small">目前沒有本機紀錄；如有雲端試填，請先載入。</p>'}</div>
+      <p id="chosenCount" class="small">已選 ${selectedForDeletion.size} 筆</p>
+      <button class="btn block danger-btn" id="deleteLocal">只清除勾選的本機紀錄</button>
+      <button class="btn block danger-btn" id="deleteBoth">清除勾選的本機＋雲端紀錄</button>
+      <div class="hint">不會刪除犬隻名單，也不會刪除雲端帳號設定。其他設備上的未同步草稿不會自動清除，須分別檢查。</div>`;
+    const refreshCount = () => { document.getElementById('chosenCount').textContent = `已選 ${selectedForDeletion.size} 筆`; };
+    document.getElementById('back').onclick = () => go({view:'home'});
+    $app.querySelectorAll('[data-mark]').forEach(el => el.onchange = () => {
+      if (el.checked) selectedForDeletion.add(el.dataset.mark); else selectedForDeletion.delete(el.dataset.mark);
+      refreshCount();
+    });
+    document.getElementById('selectAll').onclick = () => { recs.forEach(r=>selectedForDeletion.add(r.record_id)); renderManage(); };
+    document.getElementById('unselectAll').onclick = () => { selectedForDeletion.clear(); renderManage(); };
+    document.getElementById('backupBeforeDelete').onclick = downloadBackup;
+    document.getElementById('loadBeforeDelete').onclick = async () => { await pull(null, true); renderManage(); };
+    document.getElementById('deleteLocal').onclick = () => clearChosen(false);
+    document.getElementById('deleteBoth').onclick = () => clearChosen(true);
+  }
+
+  async function clearChosen(withCloud) {
+    if (deleting || syncing) { toast('目前正在同步或清除資料，請稍後操作'); return; }
+    const ids = [...selectedForDeletion].filter(id => !!loadRecords()[id]);
+    if (!ids.length) { toast('請先勾選要清除的試填紀錄'); return; }
+    const label = withCloud ? '本機與雲端' : '本機';
+    const text = prompt(`即將清除 ${ids.length} 筆${label}紀錄，無法復原。\n請先下載備份，再輸入「刪除試填」確認：`);
+    if (text !== '刪除試填') { toast('已取消清除'); return; }
+    if (!confirm(`最後確認：確定清除選取的 ${ids.length} 筆${label}紀錄？`)) return;
+    const s = loadSettings();
+    if (withCloud && (!s.url || !s.key || !navigator.onLine)) {
+      toast('雲端刪除需要網路，以及已設定的 Apps Script 網址與金鑰'); return;
+    }
+    deleting = true; updateSyncBadge();
+    try {
+      if (withCloud) {
+        const data = await callApi(s.url, { method: 'POST', headers: {'Content-Type': 'text/plain;charset=utf-8'},
+          body: JSON.stringify({action:'deleteRecords', key:s.key, confirm:'DELETE_SELECTED_TEST_RECORDS', record_ids:ids}) });
+        if (!data.ok) throw new Error(data.error || '雲端拒絕刪除');
+      }
+      const recs = loadRecords();
+      ids.forEach(id => { delete recs[id]; selectedForDeletion.delete(id); });
+      saveRecords(recs);
+      toast(`已清除 ${ids.length} 筆${label}紀錄`);
+    } catch(e) {
+      toast('清除未完成，本機資料保留：' + e.message);
+    } finally {
+      deleting = false; updateSyncBadge(); renderManage();
+    }
+  }
+
   // ---------- 設定 ----------
   function renderSettings() {
     const s = loadSettings();
@@ -468,8 +519,9 @@
       <div class="field"><label class="flabel">存取金鑰</label><input id="sKey" type="password" value="${esc(s.key || '')}"><div class="hint">與 Apps Script「指令碼屬性」ACCESS_KEY 相同</div></div>
       <button class="btn primary block" id="sSave">儲存</button>
       <button class="btn ghost block" id="sTest">測試連線</button>
-      <h3>資料備份</h3><button class="btn ghost block" id="sExport">下載本機所有紀錄（JSON）</button><div class="hint">雲端讀取需同步更新 Apps Script 的 Code.gs 並部署新版本。下載備份可避免本機資料遺失。</div>`;
+      <h3>資料與試填管理</h3><button class="btn ghost block" id="toManage">管理／清除試填紀錄</button><button class="btn ghost block" id="sExport">下載本機所有紀錄（JSON）</button><div class="hint">雲端讀取需同步更新 Apps Script 的 Code.gs 並部署新版本。下載備份可避免本機資料遺失。</div>`;
     document.getElementById('back').onclick = () => go({ view: 'home' });
+    document.getElementById('toManage').onclick = () => go({ view: 'manage' });
     const read = () => ({ url: document.getElementById('sUrl').value.trim(), key: document.getElementById('sKey').value.trim() });
     document.getElementById('sSave').onclick = () => { saveSettings(read()); toast('已儲存'); };
     document.getElementById('sTest').onclick = async () => {
@@ -492,6 +544,7 @@
     else if (state.view === 'dog') renderDog();
     else if (state.view === 'form') renderForm();
     else if (state.view === 'settings') renderSettings();
+    else if (state.view === 'manage') renderManage();
     updateSyncBadge();
     // 進入某隻狗的頁面時，自動在背景從雲端載入
     if (next && next.view === 'dog' && (prevView !== 'dog' || prevDog !== state.dogId)) pull(state.dogId, false);
