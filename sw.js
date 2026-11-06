@@ -1,5 +1,5 @@
 /* 離線快取：只快取本網站的檔案，不攔截 Apps Script 的上傳請求 */
-const CACHE = 'miaoli-tiandiao-v2.2.0';
+const CACHE = 'miaoli-tiandiao-v2.4.0';
 const FILES = ['./', './index.html', './app.js', './fields.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

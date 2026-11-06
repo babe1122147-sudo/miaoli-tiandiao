@@ -1,21 +1,18 @@
-/* 苗栗田調 手機紀錄頁 v2.2
+/* 苗栗田調 手機紀錄頁 v2.4
  * 離線可填、恢復連線自動同步到 Google 試算表（Apps Script 接收）
  */
 (function () {
   'use strict';
-  const APP_VERSION = '2.2.0';
+  const APP_VERSION = '2.4.0';
   const LS_RECORDS = 'mlt_records_v2';
   const LS_SETTINGS = 'mlt_settings_v2';
   const VISITS = ['第1次', '第2次', '第3次', '第4次'];
-  const LEVEL_OF = {};
-  FORM.ladder.forEach(g => g.items.forEach(it => { LEVEL_OF[it] = g.lv; }));
-  const LADDER_ITEMS = FORM.ladder.flatMap(g => g.items);
   const IDENTITY_KEYS = FORM.sections.find(s => s.id === 'identity').fields.map(f => f.k);
   const TIMINGS = FORM.passes.timings;
   const secById = id => FORM.sections.find(s => s.id === id);
 
-  // 固定的試算表欄位順序（依表單呈現順序；勾選行為後面接「_最高層級」）
-  const colsOf = fields => fields.flatMap(f => f.t === 'ladder' ? [f.k, f.k + '_最高層級'] : [f.k]);
+  // 固定的試算表欄位順序：客觀行為紀錄不自動推定壓力門檻或最高階梯層級。
+  const colsOf = fields => fields.map(f => f.k);
   const COLUMNS = {
     main: FORM.layout.flatMap(L => L.sec ? colsOf(secById(L.sec).fields) : L.events ? colsOf(FORM.events.head) : []),
     passes: colsOf(FORM.passes.fields), activities: colsOf(FORM.activities.fields), events: colsOf(FORM.events.fields),
@@ -38,9 +35,7 @@
   const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const dogById = id => FORM.dogs.find(d => d.id === id);
-  const maxLevel = arr => (arr || []).reduce((m, it) => Math.max(m, LEVEL_OF[it] || 0), 0);
   const isEmpty = v => v === '' || v == null || (Array.isArray(v) && !v.length);
-  const levelText = sel => { const lv = maxLevel(sel); return lv ? `最高層級：第 ${lv} 層${lv >= 4 ? '（已超過反應門檻）' : ''}` : '尚未勾選'; };
 
   function toast(msg) {
     const t = document.getElementById('toast');
@@ -51,12 +46,14 @@
   function updateSyncBadge() {
     const recs = Object.values(loadRecords());
     const pending = recs.filter(r => r.status === 'pending').length;
+    const drafts = recs.filter(r => r.status === 'draft').length;
     if (syncing) { $sync.textContent = '同步中…'; $sync.className = 'badge busy'; }
     else if (pending) { $sync.textContent = `待上傳 ${pending} 筆`; $sync.className = 'badge warn'; }
-    else { $sync.textContent = navigator.onLine ? '已全部上傳' : '離線中'; $sync.className = navigator.onLine ? 'badge ok' : 'badge'; }
+    else if (drafts) { $sync.textContent = `草稿 ${drafts} 筆`; $sync.className = 'badge'; }
+    else { $sync.textContent = navigator.onLine ? '無待上傳紀錄' : '離線中'; $sync.className = navigator.onLine ? 'badge ok' : 'badge'; }
   }
 
-  // ---------- 行人經過：每次固定三趟 ----------
+  // ---------- 行人經過：陪伴前、陪伴後各一趟；舊版第三趟仍完整保留 ----------
   function lastRecordOf(dogId, excludeId) {
     return Object.values(loadRecords()).filter(r => r.dog_id === dogId && r.record_id !== excludeId)
       .sort((a, b) => ((b.main['日期'] || '') + b.created_at).localeCompare((a.main['日期'] || '') + a.created_at))[0];
@@ -68,7 +65,7 @@
   }
   function makePasses(dogId, excludeId) {
     const dist = lastDistance(dogId, excludeId);
-    return TIMINGS.map(x => ({ '經過時機': x, '是否執行': '執行', '經過距離（公尺）': dist }));
+    return TIMINGS.map(x => ({ '經過時機': x, '是否執行': '', '經過距離（公尺）': dist }));
   }
   // 舊紀錄缺少的時機自動補上（不刪除既有資料）
   function ensurePasses(rec) {
@@ -77,7 +74,7 @@
     TIMINGS.forEach(x => {
       if (!rec.passes.some(p => p['經過時機'] === x)) {
         const dist = (rec.passes.find(p => !isEmpty(p['經過距離（公尺）'])) || {})['經過距離（公尺）'] || '';
-        rec.passes.push({ '經過時機': x, '是否執行': '執行', '經過距離（公尺）': dist }); changed = true;
+        rec.passes.push({ '經過時機': x, '是否執行': '', '經過距離（公尺）': dist }); changed = true;
       }
     });
     return changed;
@@ -90,9 +87,9 @@
     const visit = VISITS[count] || '加訪';
     const r = {
       record_id: uuid(), dog_id: dogId, created_at: nowIso(), updated_at: nowIso(), status: 'draft',
-      main: { '訪視次序': visit, '日期': today(), '開始時間': nowTime(), '階段0_觀察秒數': 300, '階段5_觀察秒數': 300 },
+      main: { '訪視次序': visit, '日期': today(), '開始時間': nowTime() },
       passes: makePasses(dogId, null),
-      activities: [{ '活動類型': '' }],
+      activities: [],
       events: [],
     };
     // 第 2 次以後自動沿用前一筆的身分資料
@@ -158,11 +155,15 @@
     if (f.t === 'select' || f.t === 'multi') {
       const sel = f.t === 'multi' ? (Array.isArray(val) ? val : []) : [val];
       input = `<div class="chips" ${name}>${f.o.map(o => `<button type="button" class="chip${sel.includes(o) ? ' on' : ''}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div>`;
-    } else if (f.t === 'ladder') {
+    } else if (f.t === 'behavior') {
       const sel = Array.isArray(val) ? val : [];
-      input = `<div class="chips ladder" ${name}>${LADDER_ITEMS.map(o => `<button type="button" class="chip${sel.includes(o) ? ' on' : ''}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div>
-        <div class="lvl" data-lvl="${esc(path + '|' + f.k)}">${levelText(sel)}</div>
-        <div class="hint">最高層級＝勾選的行為中，在行為表現階梯上最高的那一層（第 1–9 層）。</div>`;
+      const groups = FORM.behaviors.map(g => {
+        const count = g.items.filter(o => sel.includes(o)).length;
+        return `<details class="behavior-group"${count ? ' open' : ''}><summary>${esc(g.title)}${count ? `（已選 ${count}）` : ''}</summary>
+          <div class="behavior-choices">${g.items.map(o => `<button type="button" class="chip${sel.includes(o) ? ' on' : ''}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div></details>`;
+      }).join('');
+      input = `<div class="behavior-picker" ${name}>${groups}</div>
+        <div class="hint">依實際看到的動作勾選；不依單一動作自動判定壓力或「超過門檻」。沒有看見不等於沒有發生。</div>`;
     } else if (f.t === 'textarea') {
       input = `<textarea ${name} rows="3">${esc(val)}</textarea>`;
     } else {
@@ -184,7 +185,8 @@
       const note = filled.length ? '已沿用前次資料，身分有變動才需要修改。' : '找不到前次資料，可展開填寫。';
       return `<details class="sec"><summary>${esc(sec.title)}</summary><div class="hint">${note}</div>${body}</details>`;
     }
-    return `<details class="sec" open><summary>${esc(sec.title)}</summary>${body}</details>`;
+    const opened = ['basic','vehicle'].includes(sec.id) || (sec.id === 'identity' && rec.main['訪視次序'] === '第1次');
+    return `<details class="sec"${opened ? ' open' : ''}><summary>${esc(sec.title)}</summary>${body}</details>`;
   }
 
   // 可重複的子表（陪伴活動、自然發生事件）
@@ -208,17 +210,36 @@
     if (L.sec) return sectionHtml(secById(L.sec), rec, dog);
     const note = L.note ? `<div class="hint">${esc(L.note)}</div>` : '';
     if (L.activities) {
-      return `<details class="sec" open><summary>${esc(L.title)}</summary>${note}
-        <h4 class="sub">${esc(FORM.activities.title)}</h4>${repeatInner('activities', FORM.activities, rec, dog, '新增活動')}
-        <h4 class="sub">陪伴中行人經過</h4>${passInner(L.pass, rec, dog)}</details>`;
+      return `<details class="sec"><summary>${esc(L.title)}</summary>${note}
+        <div class="hint">本次若不適合提供活動，可不新增活動；由 A 記錄不提供的原因。</div>
+        <h4 class="sub">${esc(FORM.activities.title)}</h4>${repeatInner('activities', FORM.activities, rec, dog, '新增活動')}</details>`;
     }
-    if (L.pass) return `<details class="sec" open><summary>${esc(L.title)}</summary>${note}${passInner(L.pass, rec, dog)}</details>`;
+    if (L.pass) return `<details class="sec"><summary>${esc(L.title)}</summary>${note}${passInner(L.pass, rec, dog)}</details>`;
     if (L.events) {
       const head = FORM.events.head.map(f => fieldHtml(f, rec.main[f.k], 'main', dog)).join('');
-      return `<details class="sec" open><summary>${esc(FORM.events.title)}</summary><div class="hint">${esc(FORM.events.note)}</div>
+      return `<details class="sec"><summary>${esc(FORM.events.title)}</summary><div class="hint">${esc(FORM.events.note)}</div>
         ${head}${repeatInner('events', FORM.events, rec, dog, '新增事件')}</details>`;
     }
     return '';
+  }
+
+  // 舊版資料保留原欄位：即使新畫面已不再顯示「陪伴中」測試與階梯分級，仍可查閱，不覆蓋原始紀錄。
+  function legacyHtml(rec) {
+    const known = new Set(FORM.sections.flatMap(s => s.fields.map(f => f.k)).concat(FORM.events.head.map(f => f.k)));
+    const older = Object.entries(rec.main || {}).filter(([k,v]) => !known.has(k) && !isEmpty(v));
+    const olderPass = (rec.passes || []).filter(p => !FORM.passes.timings.includes(p['經過時機']));
+    const oldKeys = new Set(FORM.passes.fields.map(f => f.k));
+    const extraPass = (rec.passes || []).filter(p => FORM.passes.timings.includes(p['經過時機']))
+      .map(p => ({ timing:p['經過時機'], vals:Object.entries(p).filter(([k,v]) => !oldKeys.has(k) && !isEmpty(v)) }))
+      .filter(x => x.vals.length);
+    if (!older.length && !olderPass.length && !extraPass.length) return '';
+    const view = (rows) => rows.map(([k,v]) => `<div class="legacy-row"><strong>${esc(k)}：</strong>${esc(Array.isArray(v) ? v.join('、') : typeof v === 'object' ? JSON.stringify(v) : v)}</div>`).join('');
+    return `<details class="sec"><summary>舊版歷史欄位（僅供查閱，原始資料保留）</summary>
+      <div class="hint">以下是舊版已存內容；新流程不再採用舊版行為階梯自動評分，也不再增加「陪伴中」行人測試。</div>
+      ${view(older)}
+      ${olderPass.map((p,i) => `<h4 class="sub">舊行人紀錄 ${i+1}（${esc(p['經過時機']||'')}）</h4>${view(Object.entries(p))}`).join('')}
+      ${extraPass.map(x=>`<h4 class="sub">${esc(x.timing)}的舊欄位</h4>${view(x.vals)}`).join('')}
+    </details>`;
   }
 
   function renderForm() {
@@ -227,7 +248,7 @@
     if (!rec) return go({ view: 'home' });
     if (ensurePasses(rec)) { recs[rec.record_id] = rec; saveRecords(recs); }
     const dog = dogById(rec.dog_id) || { id: rec.dog_id, name: '', type: '' };
-    const parts = FORM.layout.map(L => blockHtml(L, rec, dog)).join('');
+    const parts = FORM.layout.map(L => blockHtml(L, rec, dog)).join('') + legacyHtml(rec);
     $app.innerHTML = `<button class="back" id="back">‹ ${esc(dog.id)}｜${esc(dog.name)}</button>
       <div class="mode"><button class="seg${state.mode === 'live' ? ' on' : ''}" data-mode="live">現場快填</button><button class="seg${state.mode === 'all' ? ' on' : ''}" data-mode="all">完整（含影片補）</button></div>
       <form id="f" autocomplete="off">${parts}</form>
@@ -245,17 +266,12 @@
   }
 
   function bindForm() {
-    $app.querySelectorAll('.chips').forEach(box => {
+    $app.querySelectorAll('.chips, .behavior-picker').forEach(box => {
       box.addEventListener('click', e => {
         const b = e.target.closest('.chip'); if (!b) return;
-        const multi = box.dataset.t === 'multi' || box.dataset.t === 'ladder';
+        const multi = box.dataset.t === 'multi' || box.dataset.t === 'behavior';
         if (multi) b.classList.toggle('on');
         else { const was = b.classList.contains('on'); box.querySelectorAll('.chip').forEach(c => c.classList.remove('on')); if (!was) b.classList.add('on'); }
-        if (box.dataset.t === 'ladder') {
-          const sel = [...box.querySelectorAll('.chip.on')].map(c => c.dataset.v);
-          const el = $app.querySelector(`[data-lvl="${CSS.escape(box.dataset.path + '|' + box.dataset.k)}"]`);
-          if (el) el.textContent = levelText(sel);
-        }
         persistForm();
         if (box.dataset.k === '訪視次序') onVisitChanged();
       });
@@ -302,7 +318,7 @@
     const recs = loadRecords();
     const rec = recs[state.recordId]; if (!rec) return;
     const before = JSON.stringify([rec.main, rec.passes, rec.activities, rec.events]);
-    $app.querySelectorAll('.chips').forEach(box => {
+    $app.querySelectorAll('.chips, .behavior-picker').forEach(box => {
       const sel = [...box.querySelectorAll('.chip.on')].map(c => c.dataset.v);
       setVal(rec, box.dataset.path, box.dataset.k, box.dataset.t === 'select' ? (sel[0] || '') : sel);
     });
@@ -320,7 +336,7 @@
   function validate(rec) {
     const miss = [];
     FORM.sections.forEach(s => s.fields.forEach(f => { if (f.req && isEmpty(rec.main[f.k])) miss.push(f.k); }));
-    (rec.activities || []).forEach((a, i) => { if (isEmpty(a['活動類型'])) miss.push(`陪伴活動第 ${i + 1} 筆的活動類型`); });
+
     return miss;
   }
 
@@ -337,28 +353,60 @@
   // ---------- 同步 ----------
   function payloadOf(rec, key) {
     const dog = dogById(rec.dog_id) || { name: '' };
-    const withLevels = rows => (rows || []).map(row => {
-      const out = Object.assign({}, row);
-      [FORM.passes, FORM.activities, FORM.events].forEach(def => def.fields.forEach(f => {
-        if (f.t === 'ladder' && Object.prototype.hasOwnProperty.call(row, f.k)) out[f.k + '_最高層級'] = maxLevel(row[f.k]) || '';
-      }));
-      return out;
-    });
     return {
       key, app_version: APP_VERSION, form_version: FORM.version, columns: COLUMNS,
       record: {
         record_id: rec.record_id, dog_id: rec.dog_id, dog_name: dog.name, created_at: rec.created_at, updated_at: rec.updated_at,
-        main: rec.main, passes: withLevels(rec.passes), activities: withLevels(rec.activities), events: withLevels(rec.events),
+        main: rec.main, passes: rec.passes, activities: rec.activities, events: rec.events,
       },
     };
   }
 
+  // 上傳仍沿用 POST；Google Apps Script 的 ContentService 會重新導向，
+  // 跨網域 GET fetch 在部分手機瀏覽器會被 CORS 阻擋，因此雲端「讀取」改用 JSONP。
   async function callApi(url, opts) {
     const res = await fetch(url, Object.assign({ redirect: 'follow' }, opts || {}));
-    const text = await res.text();
-    try { return JSON.parse(text); }
-    catch (e) { throw new Error(/<html/i.test(text) ? 'Apps Script 回傳登入頁，請確認部署時「誰可以存取」選「所有人」' : '回應格式錯誤'); }
+    const body = await res.text();
+    try { return JSON.parse(body); }
+    catch (e) { throw new Error(/<html/i.test(body) ? 'Apps Script 回傳網頁而非資料，請檢查部署存取權與版本' : '伺服器回應不是 JSON'); }
   }
+
+  let jsonpSeq = 0;
+  function cloudRead(url, params) {
+    return new Promise((resolve, reject) => {
+      let addr;
+      try {
+        addr = new URL(url);
+        if (addr.protocol !== 'https:' || addr.hostname !== 'script.google.com' || !/\/macros\/s\/[^/]+\/exec$/.test(addr.pathname)) {
+          throw new Error('請填入 https://script.google.com/macros/s/…/exec 的部署網址');
+        }
+      } catch (e) { reject(e); return; }
+      const callback = '__mltCloudRead_' + Date.now() + '_' + (++jsonpSeq);
+      Object.entries(params).forEach(([k,v]) => { if (v !== '' && v != null) addr.searchParams.set(k, v); });
+      addr.searchParams.set('callback', callback);
+      addr.searchParams.set('_', String(Date.now()));
+      const tag = document.createElement('script');
+      tag.async = true;
+      tag.referrerPolicy = 'no-referrer';
+      let done = false;
+      let timer;
+      const finish = (error, data) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        tag.remove();
+        try { delete window[callback]; } catch (ignore) { window[callback] = undefined; }
+        if (error) reject(error); else resolve(data);
+      };
+      window[callback] = data => finish(null, data);
+      tag.onerror = () => finish(new Error('雲端讀取連線失敗；請確認 Apps Script 已更新部署，且網路允許連線'));
+      tag.onload = () => { if (!done) finish(new Error('雲端尚未回傳新版讀取格式；請更新 Code.gs 並部署「新版本」')); }; 
+      timer = setTimeout(() => finish(new Error('讀取逾時，請檢查網路或稍後重試')), 30000);
+      tag.src = addr.toString();
+      (document.head || document.body).appendChild(tag);
+    });
+  }
+  const readCloud = (s, action, dogId) => cloudRead(s.url, { action, key: s.key, dog: dogId || '' });
 
   async function syncAll(manual) {
     const s = loadSettings();
@@ -394,24 +442,23 @@
     if (!s.url || !s.key) { if (manual) toast('請先到「設定」填網址與存取金鑰'); return; }
     if (!navigator.onLine) { if (manual) toast('目前離線，請到有網路的地方再載入'); return; }
     try {
-      const q = `${s.url}?action=list&key=${encodeURIComponent(s.key)}${dogId ? `&dog=${encodeURIComponent(dogId)}` : ''}`;
-      const data = await callApi(q);
+      const data = await readCloud(s, 'list', dogId);
       if (!data.ok) throw new Error(data.error || '讀取失敗');
+      if (!Array.isArray(data.records)) throw new Error('雲端資料格式異常，找不到紀錄清單');
       const recs = loadRecords(); let added = 0, kept = 0;
-      (data.records || []).forEach(r => {
+      data.records.forEach(r => {
         if (!r || !r.record_id) return;
         const local = recs[r.record_id];
-        if (local && local.status !== 'synced' && (local.updated_at || '') >= (r.updated_at || '')) { kept++; return; }
+        if (local && (local.status !== 'synced' || (local.updated_at || '') > (r.updated_at || ''))) { kept++; return; }
         recs[r.record_id] = { record_id: r.record_id, dog_id: r.dog_id, created_at: r.created_at, updated_at: r.updated_at, status: 'synced',
-          main: r.main || {}, passes: stripLv(r.passes), activities: stripLv(r.activities), events: stripLv(r.events) };
+          main: r.main || {}, passes: r.passes || [], activities: r.activities || [], events: r.events || [] };
         added++;
       });
       saveRecords(recs);
-      if (manual) toast(`已載入 ${added} 筆${kept ? `（${kept} 筆手機上的較新版本已保留）` : ''}`);
+      if (manual) toast(`雲端查到 ${data.records.length} 筆，更新 ${added} 筆${kept ? `、保留手機未上傳或較新 ${kept} 筆` : ''}`);
       if (state.view === 'dog' || state.view === 'home') go({});
     } catch (e) { if (manual) toast('載入失敗：' + e.message); }
   }
-  const stripLv = rows => (rows || []).map(r => { const o = {}; Object.keys(r || {}).forEach(k => { if (!/_最高層級$/.test(k)) o[k] = r[k]; }); return o; });
 
   // ---------- 設定 ----------
   function renderSettings() {
@@ -421,13 +468,13 @@
       <div class="field"><label class="flabel">存取金鑰</label><input id="sKey" type="password" value="${esc(s.key || '')}"><div class="hint">與 Apps Script「指令碼屬性」ACCESS_KEY 相同</div></div>
       <button class="btn primary block" id="sSave">儲存</button>
       <button class="btn ghost block" id="sTest">測試連線</button>
-      <h3>資料備份</h3><button class="btn ghost block" id="sExport">下載本機所有紀錄（JSON）</button>`;
+      <h3>資料備份</h3><button class="btn ghost block" id="sExport">下載本機所有紀錄（JSON）</button><div class="hint">雲端讀取需同步更新 Apps Script 的 Code.gs 並部署新版本。下載備份可避免本機資料遺失。</div>`;
     document.getElementById('back').onclick = () => go({ view: 'home' });
     const read = () => ({ url: document.getElementById('sUrl').value.trim(), key: document.getElementById('sKey').value.trim() });
     document.getElementById('sSave').onclick = () => { saveSettings(read()); toast('已儲存'); };
     document.getElementById('sTest').onclick = async () => {
       const x = read(); saveSettings(x);
-      try { const d = await callApi(`${x.url}?action=ping&key=${encodeURIComponent(x.key)}`); toast(d.ok ? '連線成功' : '連線失敗：' + d.error); }
+      try { const d = await readCloud(x, 'list'); if (!d.ok) throw new Error(d.error || '雲端拒絕讀取'); if (!Array.isArray(d.records)) throw new Error('讀取回應格式異常'); toast('雲端讀取成功，共 ' + d.records.length + ' 筆紀錄'); }
       catch (e) { toast('連線失敗：' + e.message); }
     };
     document.getElementById('sExport').onclick = () => {
